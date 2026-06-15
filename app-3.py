@@ -1,66 +1,208 @@
+"""
+Budget Quest: Financial Hero - Educational game for money management
+Refactored with bug fixes, config externalization, and improved structure
+"""
+
 import streamlit as st
 import random
 import json
 from datetime import datetime
 import os
+import logging
+
+# ====================== CONFIGURATION ======================
+
+GAME_CONFIG = {
+    "difficulty": {
+        "easy": {
+            "starting_balance": 500.0,
+            "income_bonus": 150,
+            "description": "Generous starting funds"
+        },
+        "normal": {
+            "starting_balance": 200.0,
+            "income_bonus": 0,
+            "description": "Realistic challenge"
+        },
+        "hard": {
+            "starting_balance": 50.0,
+            "income_penalty": 50,
+            "description": "Difficult struggle"
+        }
+    },
+    "income": {
+        "ssi": 994,
+        "part_time": 994,
+        "student": 750
+    },
+    "late_fee_rate": 0.15,
+    "weekly_living_costs": 815,
+    "skill_bonus": {
+        "budgeting_discount": 0.05,  # per level
+        "saving_interest_rate": 0.005,  # monthly
+    },
+    "leaderboard_file": "leaderboard.json",
+    "default_bills": {
+        "Rent": {"amount": 350, "due_week": 1, "auto_pay_discount": 10},
+        "Utilities": {"amount": 90, "due_week": 2},
+        "Groceries": {"amount": 220, "due_week": 1},
+        "Transportation": {"amount": 60, "due_week": 3},
+        "Phone/Internet": {"amount": 45, "due_week": 2},
+        "Health/Misc": {"amount": 50, "due_week": 4},
+    }
+}
+
+# Setup logging for debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ====================== UTILITY FUNCTIONS ======================
+
+def safe_apply_effect(player, effect_str):
+    """
+    Safely apply effect string to player. Validates input to prevent errors.
+    Format: "stat+value, stat-value" e.g., "health+10, reputation-5"
+    """
+    if not effect_str or not isinstance(effect_str, str):
+        return
+    
+    effects = effect_str.split(", ")
+    for eff in effects:
+        eff = eff.strip()
+        if not eff:
+            continue
+        try:
+            # Extract signed integer
+            if "+" in eff:
+                sign = 1
+                digits = eff.split("+")[-1]
+            elif "-" in eff and not eff.startswith("-"):
+                sign = -1
+                digits = eff.split("-")[-1]
+            else:
+                continue
+            
+            val = int(digits) * sign
+            
+            if "health" in eff.lower():
+                player.health = max(0, min(100, player.health + val))
+            elif "reputation" in eff.lower():
+                player.reputation = max(0, min(100, player.reputation + val))
+            else:
+                for skill in ["budgeting", "saving", "negotiation"]:
+                    if skill in eff.lower():
+                        key = skill.capitalize()
+                        player.skills[key] = min(5, player.skills.get(key, 1) + abs(val))
+                        break
+        except (ValueError, IndexError, TypeError) as e:
+            logger.warning(f"Error applying effect '{eff}': {e}")
+            continue
+
+def load_leaderboard():
+    """Load leaderboard from file or return defaults."""
+    file_path = GAME_CONFIG["leaderboard_file"]
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading leaderboard: {e}")
+    
+    return {
+        "balance": [
+            {"name": "Seth L", "score": 1250, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
+            {"name": "Jess G", "score": 980, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
+            {"name": "Jeff H", "score": 650, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
+        ],
+        "health": [
+            {"name": "Seth L", "score": 95, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
+            {"name": "Jess G", "score": 88, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
+            {"name": "Jeff H", "score": 72, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
+        ],
+        "reputation": [
+            {"name": "Seth L", "score": 92, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
+            {"name": "Jess G", "score": 85, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
+            {"name": "Jeff H", "score": 68, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
+        ]
+    }
+
+def save_leaderboard(leaderboard):
+    """Save leaderboard to file."""
+    try:
+        with open(GAME_CONFIG["leaderboard_file"], "w") as f:
+            json.dump(leaderboard, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving leaderboard: {e}")
+
+def update_leaderboard(player):
+    """Add player to leaderboard if high-scoring."""
+    lb = load_leaderboard()
+    
+    entry = {"name": player.name, "score": int(player.balance), "avatar": player.avatar}
+    lb["balance"].append(entry)
+    lb["balance"] = sorted(lb["balance"], key=lambda x: x["score"], reverse=True)[:10]
+    
+    entry_h = {"name": player.name, "score": player.health, "avatar": player.avatar}
+    lb["health"].append(entry_h)
+    lb["health"] = sorted(lb["health"], key=lambda x: x["score"], reverse=True)[:10]
+    
+    entry_r = {"name": player.name, "score": player.reputation, "avatar": player.avatar}
+    lb["reputation"].append(entry_r)
+    lb["reputation"] = sorted(lb["reputation"], key=lambda x: x["score"], reverse=True)[:10]
+    
+    save_leaderboard(lb)
+    return lb
 
 # ====================== CORE CLASSES ======================
 
 class Player:
     def __init__(self, name="Hero", income=994, difficulty="normal", career="ssi"):
         self.name = name
-        self.avatar = "🧑"  # Default avatar, customizable
+        self.avatar = "🧑"
         self.base_income = income
         self.income = income
         self.difficulty = difficulty.lower()
         self.career = career.lower()
         
-        if self.difficulty == "easy":
-            self.balance = 500.0
-            self.income += 150
-        elif self.difficulty == "hard":
-            self.balance = 50.0
-            self.income -= 50
-        else:
-            self.balance = 200.0
+        # Apply difficulty settings
+        diff_config = GAME_CONFIG["difficulty"].get(self.difficulty, GAME_CONFIG["difficulty"]["normal"])
+        self.balance = diff_config["starting_balance"]
+        self.income += diff_config.get("income_bonus", 0) - diff_config.get("income_penalty", 0)
         
         self.month = 1
-        self.week = 1  # 1-4 per month
+        self.week = 1
         self.health = 100
         self.reputation = 50
         self.skills = {"Budgeting": 1, "Saving": 1, "Negotiation": 1}
-        # Skill Tree Branches (Tiered progression)
         self.skill_tree = {
             "Budgeting": {"level": 1, "max": 5, "bonus": "reduces grocery/utility costs by 5% per level"},
             "Saving": {"level": 1, "max": 5, "bonus": "monthly interest/savings buffer"},
             "Negotiation": {"level": 1, "max": 5, "bonus": "better aid & deals"},
-            # Tier 2 Branches (unlocked at level 3+)
             "Debt Mastery": {"level": 0, "max": 4, "bonus": "reduces late fees & debt stress"},
             "Investment Basics": {"level": 0, "max": 4, "bonus": "small passive gains"},
-            # Tier 3 (high rep)
             "Entrepreneur Path": {"level": 0, "max": 3, "bonus": "side gig multipliers"},
             "Legacy Planning": {"level": 0, "max": 3, "bonus": "long-term reputation & health"}
         }
+        
         self.inventory = []
         self.community_visits = 0
         self.unlocked_events = []
-        self.history = []  # For charts: (month, balance, health, rep)
-        self.earnings_this_month = 0  # For part-time job calculations
-        
-        # Weekly Appointments / Calendar
-        self.appointments = []  # List of dicts: {"week": int, "task": str, "completed": bool}
+        self.history = []
+        self.earnings_this_month = 0
+        self.appointments = []
         self.organization_score = 0
         
-        # Bill Management
-        self.bills = {
-            "Rent": {"amount": 350, "due_week": 1, "paid": False, "auto_pay": False},
-            "Utilities": {"amount": 90, "due_week": 2, "paid": False},
-            "Groceries": {"amount": 220, "due_week": 1, "paid": False},
-            "Transportation": {"amount": 60, "due_week": 3, "paid": False},
-            "Phone/Internet": {"amount": 45, "due_week": 2, "paid": False},
-            "Health/Misc": {"amount": 50, "due_week": 4, "paid": False},
-        }
-        self.rent_auto_pay = False  # Discount if auto-pay
+        # Initialize bills from config
+        self.bills = {}
+        for bill_name, bill_config in GAME_CONFIG["default_bills"].items():
+            self.bills[bill_name] = {
+                "amount": bill_config["amount"],
+                "due_week": bill_config["due_week"],
+                "paid": False,
+                "auto_pay": False
+            }
+        
+        self.rent_auto_pay = False
         
         # Monthly Bingo
         self.bingo_board = [[False for _ in range(3)] for _ in range(3)]
@@ -72,9 +214,11 @@ class Player:
         self.completed_bingo_lines = 0
 
     def setup_rent_option(self, auto_pay):
+        """Enable auto-pay discount for rent."""
         self.rent_auto_pay = auto_pay
         if auto_pay:
-            self.bills["Rent"]["amount"] = 340  # Small discount
+            discount = GAME_CONFIG["default_bills"]["Rent"]["auto_pay_discount"]
+            self.bills["Rent"]["amount"] = 350 - discount
             self.bills["Rent"]["auto_pay"] = True
 
     def apply_part_time_earnings(self, earnings):
@@ -90,11 +234,8 @@ class Player:
         self.income = max(0, self.base_income - reduction)
         return earnings
 
-    def receive_income(self):
-        self.balance += self.income
-        return f"Month {self.month} Income (1st): +${self.income}"
-
     def pay_bill(self, bill_name):
+        """Pay a single bill. Returns amount paid."""
         if bill_name in self.bills and not self.bills[bill_name]["paid"]:
             amount = self.bills[bill_name]["amount"]
             self.balance -= amount
@@ -105,14 +246,15 @@ class Player:
         return 0
 
     def reset_bills(self):
+        """Reset all bills for new month. Auto-pay rent if enabled."""
         for bill in self.bills.values():
             bill["paid"] = False
         if self.rent_auto_pay:
-            self.bills["Rent"]["paid"] = True  # Auto-paid on 1st
+            self.bills["Rent"]["paid"] = True
 
     def access_community_resources(self):
+        """Access community aid. Higher reputation = better rewards."""
         self.community_visits += 1
-        aid_amount = 0
         is_free_event = random.random() > 0.6 or self.reputation > 70
         
         if self.balance < 150 or self.health < 60 or is_free_event:
@@ -129,6 +271,7 @@ class Player:
         return 0, "Community resources not needed this period."
 
     def add_to_history(self):
+        """Record monthly stats for chart."""
         self.history.append({
             "month": self.month,
             "balance": round(self.balance, 2),
@@ -137,15 +280,17 @@ class Player:
         })
 
     def reset_bingo(self):
+        """Reset monthly bingo board."""
         self.bingo_board = [[False for _ in range(3)] for _ in range(3)]
         self.completed_bingo_lines = 0
 
     def reset_weekly_appointments(self):
-        """Reset appointments for new month"""
+        """Reset appointments for new month."""
         self.appointments = []
         self.organization_score = 0
 
     def add_appointment(self, task):
+        """Add appointment to current week."""
         self.appointments.append({
             "week": self.week,
             "task": task,
@@ -154,6 +299,7 @@ class Player:
         return f"Added appointment: {task} (Week {self.week})"
 
     def complete_appointment(self, idx):
+        """Mark appointment as complete."""
         if 0 <= idx < len(self.appointments):
             self.appointments[idx]["completed"] = True
             self.organization_score += 1
@@ -161,55 +307,58 @@ class Player:
         return False
 
     def get_organization_bonus(self):
-        """Bonus based on completed appointments"""
+        """Apply bonus for completing appointments."""
         completed = sum(1 for a in self.appointments if a["completed"])
-        bonus = min(25, completed * 4)  # +rep/health
+        bonus = min(25, completed * 4)
         self.reputation = min(100, self.reputation + bonus)
         self.health = min(100, self.health + bonus // 2)
         return bonus
 
     def upgrade_skill(self, skill_name):
-        """Upgrade skill and apply tree effects"""
+        """Upgrade skill and unlock tier 2/3 branches."""
         if skill_name in self.skills:
             if self.skills[skill_name] < 5:
                 self.skills[skill_name] = min(5, self.skills[skill_name] + 1)
                 # Check for tier 2 unlocks
                 if self.skills[skill_name] >= 3 and skill_name in ["Budgeting", "Saving", "Negotiation"]:
-                    if skill_name == "Budgeting" and self.skill_tree["Debt Mastery"]["level"] == 0:
-                        self.skill_tree["Debt Mastery"]["level"] = 1
-                    elif skill_name == "Saving" and self.skill_tree["Investment Basics"]["level"] == 0:
-                        self.skill_tree["Investment Basics"]["level"] = 1
-                    elif skill_name == "Negotiation" and self.skill_tree["Entrepreneur Path"]["level"] == 0:
-                        self.skill_tree["Entrepreneur Path"]["level"] = 1
+                    tier2_map = {
+                        "Budgeting": "Debt Mastery",
+                        "Saving": "Investment Basics",
+                        "Negotiation": "Entrepreneur Path"
+                    }
+                    tier2_skill = tier2_map.get(skill_name)
+                    if tier2_skill and self.skill_tree[tier2_skill]["level"] == 0:
+                        self.skill_tree[tier2_skill]["level"] = 1
                 return True
         elif skill_name in self.skill_tree and self.skill_tree[skill_name]["level"] < self.skill_tree[skill_name]["max"]:
-            if self.reputation >= 60:  # Higher tier requirement
+            if self.reputation >= 60:
                 self.skill_tree[skill_name]["level"] += 1
                 return True
         return False
 
-    def get_skill_bonuses(self):
-        """Apply passive bonuses based on skill tree levels"""
+    def apply_skill_bonuses(self):
+        """Apply passive bonuses from skill tree."""
         budgeting_lvl = self.skills.get("Budgeting", 1)
         if budgeting_lvl > 1:
-            # 5% reduction per level above 1 on Groceries and Utilities
-            discount = (budgeting_lvl - 1) * 0.05
+            discount = (budgeting_lvl - 1) * GAME_CONFIG["skill_bonus"]["budgeting_discount"]
             for bill_name in ["Groceries", "Utilities"]:
                 if bill_name in self.bills:
-                    base = {"Groceries": 220, "Utilities": 90}[bill_name]
+                    base = GAME_CONFIG["default_bills"][bill_name]["amount"]
                     self.bills[bill_name]["amount"] = round(base * (1 - discount), 2)
 
         saving_lvl = self.skills.get("Saving", 1)
-        if saving_lvl > 1:
-            # Small monthly interest on positive balance
-            if self.balance > 0:
-                interest = round(self.balance * 0.005 * (saving_lvl - 1), 2)
-                self.balance += interest
-                return f"Skill bonuses active — Budgeting saves on bills, Saving earned ${interest} interest"
+        interest_msg = ""
+        if saving_lvl > 1 and self.balance > 0:
+            interest = round(
+                self.balance * GAME_CONFIG["skill_bonus"]["saving_interest_rate"] * (saving_lvl - 1), 2
+            )
+            self.balance += interest
+            interest_msg = f", Saving earned ${interest} interest"
 
-        return "Skill bonuses active"
+        return f"Skill bonuses active — Budgeting saves on bills{interest_msg}"
 
     def check_bingo_wins(self):
+        """Count bingo lines (rows, cols, diagonals)."""
         lines = 0
         # Rows
         for row in self.bingo_board:
@@ -224,8 +373,8 @@ class Player:
             lines += 1
         if all(self.bingo_board[i][2-i] for i in range(3)):
             lines += 1
-        self.completed_bingo_lines = lines
         return lines
+
 
 class Quest:
     def __init__(self):
@@ -302,36 +451,6 @@ class Quest:
             return random.choice(self.unlockable_quests), True
         return random.choice(self.quests), False
 
-def apply_effect(player, effect_str):
-    if not effect_str:
-        return
-    effects = effect_str.split(", ")
-    for eff in effects:
-        eff = eff.strip()
-        try:
-            # Extract signed integer: e.g. "health+10" -> +10, "health-25" -> -25
-            if "+" in eff:
-                sign = 1
-                digits = eff.split("+")[-1]
-            elif "-" in eff and not eff.startswith("-"):
-                sign = -1
-                digits = eff.split("-")[-1]
-            else:
-                continue
-            val = int(digits) * sign
-            if "health" in eff.lower():
-                player.health = max(0, min(100, player.health + val))
-            elif "reputation" in eff.lower():
-                player.reputation = max(0, min(100, player.reputation + val))
-            else:
-                for skill in ["budgeting", "saving", "negotiation"]:
-                    if skill in eff.lower():
-                        key = skill.capitalize()
-                        # Cap core skills at 5
-                        player.skills[key] = min(5, player.skills.get(key, 1) + abs(val))
-                        break
-        except (ValueError, IndexError):
-            pass
 
 # ====================== STREAMLIT APP ======================
 
@@ -339,7 +458,7 @@ st.set_page_config(page_title="Budget Quest", page_icon="🛡️", layout="wide"
 st.title("🛡️ Budget Quest: Financial Hero")
 st.markdown("**Learn money management through fun quests on a fixed income!**")
 
-# Session State
+# Session State Initialization
 if "player" not in st.session_state:
     st.session_state.player = None
 if "quest_manager" not in st.session_state:
@@ -354,6 +473,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 def reset_game():
+    """Reset all game state."""
     st.session_state.player = None
     st.session_state.quest_manager = None
     st.session_state.current_quest = None
@@ -361,61 +481,7 @@ def reset_game():
     st.session_state.game_over = False
     st.session_state.messages = []
 
-# Leaderboard persistence
-LEADERBOARD_FILE = "leaderboard.json"
-
-def load_leaderboard():
-    if os.path.exists(LEADERBOARD_FILE):
-        try:
-            with open(LEADERBOARD_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    # Default leaderboard with Seth L, Jess G, Jeff H
-    return {
-        "balance": [
-            {"name": "Seth L", "score": 1250, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
-            {"name": "Jess G", "score": 980, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
-            {"name": "Jeff H", "score": 650, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
-        ],
-        "health": [
-            {"name": "Seth L", "score": 95, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
-            {"name": "Jess G", "score": 88, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
-            {"name": "Jeff H", "score": 72, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
-        ],
-        "reputation": [
-            {"name": "Seth L", "score": 92, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=seth"},
-            {"name": "Jess G", "score": 85, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jess"},
-            {"name": "Jeff H", "score": 68, "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=jeff"}
-        ]
-    }
-
-def save_leaderboard(leaderboard):
-    with open(LEADERBOARD_FILE, "w") as f:
-        json.dump(leaderboard, f, indent=2)
-
-def update_leaderboard(player):
-    lb = load_leaderboard()
-    entry = {"name": player.name, "score": int(player.balance), "avatar": player.avatar}
-    
-    # Update Balance
-    lb["balance"].append(entry)
-    lb["balance"] = sorted(lb["balance"], key=lambda x: x["score"], reverse=True)[:10]
-    
-    # Update Health
-    entry_h = {"name": player.name, "score": player.health, "avatar": player.avatar}
-    lb["health"].append(entry_h)
-    lb["health"] = sorted(lb["health"], key=lambda x: x["score"], reverse=True)[:10]
-    
-    # Update Reputation
-    entry_r = {"name": player.name, "score": player.reputation, "avatar": player.avatar}
-    lb["reputation"].append(entry_r)
-    lb["reputation"] = sorted(lb["reputation"], key=lambda x: x["score"], reverse=True)[:10]
-    
-    save_leaderboard(lb)
-    return lb
-
-# Sidebar - Setup / Controls
+# ====================== SIDEBAR ======================
 with st.sidebar:
     st.header("Game Setup")
     if st.button("New Game", type="primary"):
@@ -424,7 +490,6 @@ with st.sidebar:
     if st.session_state.player is None:
         name = st.text_input("Hero Name", value="Budget Hero")
         
-        # Image-based Avatar customization
         avatar_options = [
             {"name": "Classic Hero", "url": "https://api.dicebear.com/7.x/avataaars/svg?seed=hero"},
             {"name": "Warrior", "url": "https://api.dicebear.com/7.x/avataaars/svg?seed=warrior"},
@@ -461,23 +526,19 @@ with st.sidebar:
             diff_lower = difficulty.lower()
             career_lower = "ssi" if "SSI" in career else "part_time" if "Part-Time" in career else "student"
             
-            base_inc = 994
-            if career_lower == "student":
-                base_inc = 750  # Lower base + potential aid in quests
-            
+            base_inc = GAME_CONFIG["income"][career_lower]
             player = Player(name=name, income=base_inc, difficulty=diff_lower, career=career_lower)
-            player.avatar = selected_avatar["url"]  # Store image URL
+            player.avatar = selected_avatar["url"]
             player.setup_rent_option(rent_option == "Auto-Pay with discount ($340)")
             st.session_state.player = player
             st.session_state.quest_manager = Quest()
             st.session_state.messages.append(f"🌟 Game started on **{difficulty}** difficulty as **{career}**! Income on the 1st.")
             st.rerun()
 
-# Main Area
+# ====================== MAIN GAME AREA ======================
 if st.session_state.player is None:
     st.info("👈 Start a new game from the sidebar to begin your financial adventure!")
     
-    # === Intro & Real Challenges Section ===
     st.markdown("## 💡 Why Budgeting Matters")
     st.markdown("""
     **Many people struggle with money management.** Without good budgeting skills, common barriers include:
@@ -508,7 +569,7 @@ else:
     player = st.session_state.player
     qm = st.session_state.quest_manager
     
-    # Top Stats
+    # ====================== TOP STATS ======================
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Balance", f"${player.balance:.2f}", delta=None)
@@ -519,12 +580,11 @@ else:
     with col4:
         st.metric("Month / Week", f"{player.month} / {player.week}")
     
-    # Display avatar image
     st.markdown(f"**Your Hero:**")
     st.image(player.avatar, width=120)
     st.markdown(f"**{player.name}**")
     
-    # Progress Charts
+    # ====================== PROGRESS CHARTS ======================
     if player.history:
         st.subheader("Progress Over Time")
         chart_data = {"Month": [h["month"] for h in player.history],
@@ -532,7 +592,7 @@ else:
                       "Health": [h["health"] for h in player.history]}
         st.line_chart(chart_data, x="Month", y=["Balance", "Health"])
     
-    # Leaderboards
+    # ====================== LEADERBOARDS ======================
     st.subheader("🏆 Global Leaderboards")
     lb = load_leaderboard()
     
@@ -556,7 +616,7 @@ else:
             st.image(entry.get('avatar', 'https://api.dicebear.com/7.x/avataaars/svg?seed=default'), width=50)
             st.write(f"{i}. **{entry['name']}** — {entry['score']}")
     
-    # Payment Tracker & Bill Options
+    # ====================== BILL PAYMENT ======================
     st.subheader("📋 Payment Tracker")
     st.markdown("**Bills due this month (income on 1st)** - Pay **before due week** to avoid **15% late fees**!")
     
@@ -566,25 +626,21 @@ else:
     else:
         st.success("✅ All bills paid this month!")
     
-    st.caption("💡 **Color Guide:** Green = Due soon (Week 1-2) | Yellow = Mid-month | Orange = Later")
-    
-    # Bill payment buttons with color-coded due dates
     cols = st.columns(3)
     for idx, (bill_name, info) in enumerate(player.bills.items()):
         with cols[idx % 3]:
             due_week = info.get("due_week", 1)
             amount = info['amount']
             
-            # Color coding
             if due_week <= 2:
-                color = "🟢"  # Early
+                color = "🟢"
             elif due_week == 3:
-                color = "🟡"  # Mid
+                color = "🟡"
             else:
-                color = "🟠"  # Late in month
+                color = "🟠"
             
             if not info.get("paid", False):
-                btn_label = f"{color} Pay {bill_name} (${amount}) - Due Week {due_week}"
+                btn_label = f"{color} Pay {bill_name} (${amount}) - Week {due_week}"
                 if st.button(btn_label, key=f"pay_{bill_name}_{player.month}"):
                     paid_amt = player.pay_bill(bill_name)
                     if paid_amt > 0:
@@ -593,43 +649,30 @@ else:
             else:
                 st.success(f"✅ {bill_name} (Paid)")
     
-    # Weekly Calendar & Appointments
+    # ====================== CALENDAR & APPOINTMENTS ======================
     st.subheader("📅 Weekly Calendar & Appointments")
-    st.markdown("**Plan your week!** The more organized you are (appointments scheduled & completed), the higher your Reputation.")
+    st.markdown("**Plan your week!** The more organized you are, the higher your Reputation.")
     
-    # Auto-suggestions (limited to 4 per week)
-    st.markdown("**💡 Suggested Appointments** (up to 4 - choose wisely to stay on track):")
     suggested_tasks = [
         "Pay upcoming bills on time",
         "Budget review & track spending",
         "Job search or side gig hunt",
         "Community resource visit",
-        "Healthy meal planning & grocery prep",
-        "Self-care / stress management",
-        "Review skill tree progress",
-        "Savings goal check-in"
     ]
     
-    # Limit to first 4 suggestions
-    display_suggestions = suggested_tasks[:4]
-    
     cols_sug = st.columns(2)
-    for i, task in enumerate(display_suggestions):
+    for i, task in enumerate(suggested_tasks):
         with cols_sug[i % 2]:
             if st.button(f"📌 {task}", key=f"sug_{player.week}_{i}"):
-                # Check if already added this week
                 existing = any(a["task"] == task and a["week"] == player.week for a in player.appointments)
                 if not existing:
                     msg = player.add_appointment(task)
                     st.session_state.messages.append(msg)
                     st.rerun()
-                else:
-                    st.info("Already added this week!")
     
-    # Add custom appointment
     col_a, col_b = st.columns([3, 1])
     with col_a:
-        new_task = st.text_input("➕ Add Custom Appointment/Task", 
+        new_task = st.text_input("➕ Add Custom Appointment", 
                                placeholder="e.g. Doctor appointment, Family time", key="new_task")
     with col_b:
         if st.button("Add to Calendar", key="add_apt"):
@@ -638,7 +681,6 @@ else:
                 st.session_state.messages.append(msg)
                 st.rerun()
     
-    # Display current week's appointments
     st.write(f"**Week {player.week} of Month {player.month}**")
     week_apts = [apt for apt in player.appointments if apt["week"] == player.week]
     if week_apts:
@@ -652,123 +694,126 @@ else:
     else:
         st.info("No appointments this week yet. Add some above to boost organization!")
     
-    # Check calendar prompt + Advance
+    # ====================== WEEK ADVANCEMENT ======================
+    def advance_to_next_week(player, qm):
+        """Handle week/month advancement logic. Returns list of messages."""
+        messages = []
+        
+        # Weekly income and expenses
+        weekly_income = round(player.income / 4, 2)
+        player.balance += weekly_income
+        messages.append(f"💵 Week {player.week} Income: +${weekly_income}")
+        
+        weekly_exp = round(GAME_CONFIG["weekly_living_costs"] / 4, 2)
+        player.balance -= weekly_exp
+        if player.balance < 0:
+            player.health = max(0, player.health - 5)
+        messages.append(f"📉 Weekly living costs: -${weekly_exp}")
+        
+        # Organization bonus at end of month
+        if player.week == 4:
+            org_bonus = player.get_organization_bonus()
+            if org_bonus > 0:
+                messages.append(f"📅 Strong organization! +{org_bonus} Reputation & health.")
+        
+        player.add_to_history()
+        player.week += 1
+        
+        # Month-end logic
+        if player.week > 4:
+            player.week = 1
+            messages.append("🌟 **End of Month Summary**")
+            player.earnings_this_month = 0
+            
+            # FIX: Check bingo wins BEFORE reset
+            bingo_lines = player.check_bingo_wins()
+            if bingo_lines > 0:
+                bonus = bingo_lines * 15
+                player.reputation = min(100, player.reputation + bonus)
+                player.balance += bingo_lines * 10
+                messages.append(f"🎉 BINGO! {bingo_lines} lines → +${bingo_lines*10} & +{bonus} Rep!")
+            
+            # FIX: Apply skill bonuses before closing month
+            bonus_msg = player.apply_skill_bonuses()
+            if "earned" in bonus_msg:
+                messages.append(f"🎓 {bonus_msg}")
+            
+            # FIX: Auto-pay rent BEFORE late fee sweep
+            if player.rent_auto_pay:
+                if not player.bills["Rent"].get("paid", False):
+                    player.pay_bill("Rent")
+                    messages.append("🏠 Rent auto-paid!")
+            
+            # Late bills handling
+            late_count = 0
+            late_fee_rate = GAME_CONFIG["late_fee_rate"]
+            for bname, binfo in list(player.bills.items()):
+                if not binfo.get("paid", False):
+                    original_amt = binfo["amount"]
+                    late_fee = round(original_amt * late_fee_rate, 2)
+                    total_late = original_amt + late_fee
+                    player.balance -= total_late
+                    binfo["paid"] = True
+                    late_count += 1
+                    messages.append(f"⚠️ LATE {bname}: ${total_late:.2f} (penalty applied)")
+            
+            if late_count > 0:
+                player.health = max(0, player.health - 8 * late_count)
+                player.reputation = max(0, player.reputation - 7 * late_count)
+            
+            # Community resources
+            if random.random() > 0.3:
+                aid, msg = player.access_community_resources()
+                messages.append(msg)
+            
+            # End of month bonuses/penalties
+            if player.balance > 150:
+                player.reputation = min(100, player.reputation + 8)
+                player.skills["Saving"] = min(5, player.skills.get("Saving", 1) + 1)
+                messages.append("💰 Solid saving this month!")
+            elif player.balance < -50:
+                player.health = max(0, player.health - 10)
+                messages.append("⚠️ Finances are stressing you out.")
+            
+            # Monthly quest
+            if random.random() > 0.25:
+                quest, is_unlock = qm.get_random_quest(player)
+                st.session_state.current_quest = quest
+                st.session_state.is_unlocked = is_unlock
+            
+            # Leaderboard update every other month
+            if player.month % 2 == 0:
+                update_leaderboard(player)
+                messages.append("🏆 Leaderboard updated!")
+            
+            # FIX: Reset monthly state AFTER all checks
+            player.reset_bingo()
+            player.reset_bills()
+            player.reset_weekly_appointments()
+            player.month += 1
+            
+            if player.health <= 0:
+                st.session_state.game_over = True
+        
+        return messages
+    
     calendar_confirmed = st.checkbox("✅ I have reviewed my calendar and appointments", value=False, key="calendar_check")
     if st.button("Advance to Next Week", type="primary"):
         if calendar_confirmed:
-            # Weekly progression
-            msgs = []
-            
-            # Weekly income portion
-            weekly_income = round(player.income / 4, 2)
-            player.balance += weekly_income
-            msgs.append(f"💵 Week {player.week} Income: +${weekly_income}")
-            
-            # Small weekly expenses
-            weekly_exp = round(815 / 4, 2)
-            player.balance -= weekly_exp
-            if player.balance < 0:
-                player.health = max(0, player.health - 5)
-                msgs.append(f"📉 Weekly living costs: -${weekly_exp}")
-            
-            # Organization bonus (stronger at end of month)
-            if player.week == 4:
-                org_bonus = player.get_organization_bonus()
-                if org_bonus > 0:
-                    msgs.append(f"📅 Strong organization this month! +{org_bonus} Reputation & health boost.")
-            
-            player.add_to_history()
-            
-            # Advance week
-            player.week += 1
-            if player.week > 4:
-                player.week = 1
-                msgs.append("🌟 **End of Month Summary**")
-                player.earnings_this_month = 0
-
-                # Bug fix: Apply skill bonuses before closing the month
-                bonus_msg = player.get_skill_bonuses()
-                if "earned" in bonus_msg:
-                    msgs.append(f"🎓 {bonus_msg}")
-
-                # Bug fix: Check bingo BEFORE reset_bingo so lines are counted correctly
-                bingo_lines = player.check_bingo_wins()
-                if bingo_lines > 0:
-                    bonus = bingo_lines * 15
-                    player.reputation = min(100, player.reputation + bonus)
-                    player.balance += bingo_lines * 10
-                    msgs.append(f"🎉 BINGO! {bingo_lines} lines → +${bingo_lines*10} & +{bonus} Rep!")
-
-                # Bug fix: Handle auto-pay BEFORE late fee sweep so rent isn't double-charged
-                if player.rent_auto_pay:
-                    if not player.bills["Rent"].get("paid", False):
-                        player.pay_bill("Rent")
-                        msgs.append("🏠 Rent auto-paid!")
-
-                # Late bills handling
-                late_count = 0
-                for bname, binfo in list(player.bills.items()):
-                    if not binfo.get("paid", False):
-                        original_amt = binfo["amount"]
-                        late_fee = round(original_amt * 0.15, 2)
-                        total_late = original_amt + late_fee
-                        player.balance -= total_late
-                        binfo["paid"] = True
-                        late_count += 1
-                        msgs.append(f"⚠️ LATE {bname}: ${total_late:.2f} (penalty applied)")
-                
-                if late_count > 0:
-                    player.health = max(0, player.health - 8 * late_count)
-                    player.reputation = max(0, player.reputation - 7 * late_count)
-                
-                # Community resources
-                if random.random() > 0.3:
-                    aid, msg = player.access_community_resources()
-                    msgs.append(msg)
-                
-                # End of month bonuses/penalties
-                if player.balance > 150:
-                    player.reputation = min(100, player.reputation + 8)
-                    player.skills["Saving"] = min(5, player.skills.get("Saving", 1) + 1)
-                    msgs.append("💰 Solid saving this month!")
-                elif player.balance < -50:
-                    player.health = max(0, player.health - 10)
-                    msgs.append("⚠️ Finances are stressing you out.")
-
-                # Monthly quest
-                if random.random() > 0.25:
-                    quest, is_unlock = qm.get_random_quest(player)
-                    st.session_state.current_quest = quest
-                    st.session_state.is_unlocked = is_unlock
-
-                # Leaderboard update every other month
-                if player.month % 2 == 0:
-                    update_leaderboard(player)
-                    msgs.append("🏆 Leaderboard updated with your progress!")
-
-                # Reset monthly state AFTER all checks
-                player.reset_bingo()
-                player.reset_bills()
-                player.reset_weekly_appointments()
-                
-                player.month += 1
-
-                if player.health <= 0:
-                    st.session_state.game_over = True
-            
-            st.session_state.messages.extend(msgs)
+            messages = advance_to_next_week(player, qm)
+            st.session_state.messages.extend(messages)
             st.rerun()
         else:
             st.warning("⚠️ Please confirm you've checked your calendar before advancing!")
             st.stop()
     
-    # Display Messages
+    # ====================== MESSAGES ======================
     if st.session_state.messages:
         with st.expander("Recent Events", expanded=True):
             for msg in st.session_state.messages[-8:]:
                 st.write(msg)
     
-    # Current Quest
+    # ====================== QUESTS ======================
     if st.session_state.current_quest:
         quest = st.session_state.current_quest
         st.subheader("🌟 " + ("UNLOCKED EVENT: " if st.session_state.is_unlocked else "QUEST: ") + quest["title"])
@@ -778,31 +823,27 @@ else:
         for i, choice in enumerate(quest["choices"]):
             cost_str = f"${choice['cost']:+.0f}"
             if st.button(f"{choice['text']}  {cost_str}", key=f"choice_{i}"):
-                earnings = 0
                 if choice["cost"] > 0:
                     earnings = choice["cost"]
                     player.balance += earnings
-                    if hasattr(player, 'apply_part_time_earnings'):
-                        actual_earnings = player.apply_part_time_earnings(earnings)
-                        st.session_state.messages.append(f"💼 Earned ${actual_earnings} (adjusted for benefits)")
+                    actual_earnings = player.apply_part_time_earnings(earnings)
+                    st.session_state.messages.append(f"💼 Earned ${actual_earnings} (adjusted for benefits)")
                 else:
                     player.balance += choice["cost"]
                 
-                apply_effect(player, choice.get("effect", ""))
-                # Award skill points occasionally
+                safe_apply_effect(player, choice.get("effect", ""))
                 if random.random() > 0.6:
                     st.session_state.messages.append("💪 +1 Skill Point earned from this choice!")
                 st.session_state.messages.append(f"✅ Chose: {choice['text']} → Balance now ${player.balance:.2f}")
                 st.session_state.current_quest = None
                 st.rerun()
-
-    # Skill Tree Section
+    
+    # ====================== SKILL TREE ======================
     st.subheader("🧗 Skill Tree - Build Your Financial Power!")
-    st.markdown("**Spend skill points earned from quests & organization on upgrades.** Higher tiers unlock powerful branches.")
-
+    st.markdown("**Upgrade skills earned from quests & organization.**")
+    
     skill_cols = st.columns(3)
-    skill_points = sum(max(0, lvl - 1) for lvl in player.skills.values()) + sum(lvl for lvl in [t["level"] for t in player.skill_tree.values()])  # rough points
-
+    
     with skill_cols[0]:
         st.markdown("**Core Skills**")
         for sk, lvl in player.skills.items():
@@ -811,17 +852,17 @@ else:
                 if player.upgrade_skill(sk):
                     st.success(f"✅ {sk} upgraded!")
                     st.rerun()
-
+    
     with skill_cols[1]:
         st.markdown("**Tier 2 Branches**")
-        for sk, data in list(player.skill_tree.items())[3:5]:  # Debt & Investment
+        for sk, data in list(player.skill_tree.items())[3:5]:
             st.progress(data["level"] / data["max"], text=f"{sk} (Lvl {data['level']}/{data['max']})")
             if st.button(f"Unlock/Upgrade {sk}", key=f"up2_{sk}", disabled=data["level"] >= data["max"] or player.reputation < 50):
                 if player.upgrade_skill(sk):
                     st.success(f"✅ {sk} advanced!")
                     st.rerun()
             st.caption(data["bonus"])
-
+    
     with skill_cols[2]:
         st.markdown("**Tier 3 Advanced**")
         for sk, data in list(player.skill_tree.items())[5:]:  
@@ -831,8 +872,8 @@ else:
                     st.success(f"✅ {sk} advanced!")
                     st.rerun()
             st.caption(data["bonus"])
-
-    # Monthly Bingo Game
+    
+    # ====================== BINGO ======================
     st.subheader("📅 Monthly Financial Bingo")
     st.markdown("Mark off habits you completed this month for big bonuses!")
     
@@ -846,60 +887,21 @@ else:
                 new_checked = st.checkbox(task, value=checked, key=f"bingo_{player.month}_{i}_{j}")
                 if new_checked != checked:
                     player.bingo_board[i][j] = new_checked
-                    # Auto-check wins on change
-                    lines = player.check_bingo_wins()
-                    if lines > player.completed_bingo_lines:
-                        st.success(f"🎉 New bingo line! Total lines: {lines}")
-                        player.completed_bingo_lines = lines
-                        # Confetti visual upgrade
-                        st.markdown("""
-                        <div style="text-align: center;">
-                            <h3>🎊🎉 CONGRATULATIONS! BINGO! 🎉🎊</h3>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        # Simple JS confetti
-                        st.markdown("""
-                        <script>
-                        function throwConfetti() {
-                            for(let i = 0; i < 100; i++) {
-                                setTimeout(() => {
-                                    const confetti = document.createElement('div');
-                                    confetti.textContent = ['🎉','🪙','💰','✨'][Math.floor(Math.random()*4)];
-                                    confetti.style.position = 'fixed';
-                                    confetti.style.left = Math.random()*100 + 'vw';
-                                    confetti.style.top = '-10px';
-                                    confetti.style.fontSize = '20px';
-                                    confetti.style.transition = 'all 3s';
-                                    confetti.style.zIndex = '9999';
-                                    document.body.appendChild(confetti);
-                                    setTimeout(() => {
-                                        confetti.style.transform = `translateY(${window.innerHeight + 100}px) rotate(${Math.random()*720}deg)`;
-                                        confetti.style.opacity = '0';
-                                    }, 50);
-                                    setTimeout(() => confetti.remove(), 3500);
-                                }, i * 30);
-                            }
-                        }
-                        throwConfetti();
-                        </script>
-                        """, unsafe_allow_html=True)
                 task_idx += 1
     
-    # Status Details
+    # ====================== STATUS ======================
     with st.expander("Full Status & Skills"):
         st.write(f"**Career Path:** {player.career.upper()}")
         st.write(f"**Current Monthly Income:** ${player.income:.2f}")
         if player.career == "part_time":
             st.write(f"**Earnings this month:** ${player.earnings_this_month}")
         st.write(f"**Core Skills:** {player.skills}")
-        st.write(f"**Skill Tree:** { {k: v['level'] for k,v in player.skill_tree.items()} }")
+        st.write(f"**Skill Tree:** {dict((k, v['level']) for k,v in player.skill_tree.items())}")
         st.write(f"**Community visits:** {player.community_visits}")
-        if player.inventory:
-            st.write(f"**Inventory:** {player.inventory}")
     
-    # Game Over / Win Check
+    # ====================== GAME OVER ======================
     if player.health <= 0 or player.month > 12:
-        st.error("💥 Game Over! Health depleted.")
+        st.error("💥 Game Over! Health depleted or year limit reached.")
         if st.button("Restart Game"):
             reset_game()
             st.rerun()
@@ -911,5 +913,4 @@ else:
             reset_game()
             st.rerun()
 
-# Footer
-st.caption("Budget Quest - Educational tool for money management | Customize income/expenses in code for specific clients")
+st.caption("Budget Quest - Educational tool for money management | Customize config at top of file")
